@@ -26,6 +26,7 @@ APortal::APortal()
  	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
     bIsActive = true;
+    RecursionThreshold = 5;
 }
 
 // Called when the game starts or when spawned
@@ -34,6 +35,7 @@ void APortal::BeginPlay()
 	Super::BeginPlay();
     CreateRenderTarget();
     CreateSceneCapture();
+    SetRTT(RenderTarget);
 }
 
 void APortal::CreateRenderTarget()
@@ -50,8 +52,8 @@ void APortal::CreateRenderTarget()
 
         RenderTarget->RenderTargetFormat = ETextureRenderTargetFormat::RTF_RGBA16f;
         RenderTarget->Filter = TextureFilter::TF_Bilinear;
-        RenderTarget->SizeX = 1920;
-        RenderTarget->SizeY = 1080;
+        RenderTarget->SizeX = FMath::Clamp(int(1920 / 1.7), 128, 1920);
+        RenderTarget->SizeY = FMath::Clamp(int(1080 / 1.7), 128, 1920);
         RenderTarget->ClearColor = FLinearColor::Black;
         RenderTarget->TargetGamma = 2.2f;
         RenderTarget->bNeedsTwoCopies = false;
@@ -75,12 +77,34 @@ void APortal::CreateSceneCapture()
     SceneCapture->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::SnapToTargetIncludingScale);
     SceneCapture->RegisterComponent();
     SceneCapture->FOVAngle = 105;
-    SceneCapture->bCaptureEveryFrame = false;
-    SceneCapture->bCaptureOnMovement = false;
-    SceneCapture->LODDistanceFactor = 1; //Force bigger LODs for faster computations
+    SceneCapture->bCaptureEveryFrame = true;
+    SceneCapture->bCaptureOnMovement = true;
+    SceneCapture->CompositeMode = ESceneCaptureCompositeMode::SCCM_Composite;
     SceneCapture->TextureTarget = RenderTarget;
     SceneCapture->bEnableClipPlane = true;
     SceneCapture->CaptureSource = ESceneCaptureSource::SCS_SceneColorHDRNoAlpha;
+
+
+    //Setup Post-Process of SceneCapture (optimization : disable Motion Blur, etc)
+    FPostProcessSettings CaptureSettings;
+
+    CaptureSettings.bOverride_AmbientOcclusionQuality = true;
+    CaptureSettings.bOverride_MotionBlurAmount = true;
+    CaptureSettings.bOverride_SceneFringeIntensity = true;
+    CaptureSettings.bOverride_GrainIntensity = true;
+    CaptureSettings.bOverride_ScreenSpaceReflectionQuality = true;
+
+    CaptureSettings.AmbientOcclusionQuality = 0.0f; //0=lowest quality..100=maximum quality
+    CaptureSettings.MotionBlurAmount = 0.0f; //0 = disabled
+    CaptureSettings.SceneFringeIntensity = 0.0f; //0 = disabled
+    CaptureSettings.GrainIntensity = 0.0f; //0 = disabled
+    CaptureSettings.ScreenSpaceReflectionQuality = 0.0f; //0 = disabled
+
+    CaptureSettings.bOverride_ScreenPercentage = true;
+    CaptureSettings.ScreenPercentage = 100.0f;
+
+    SceneCapture->PostProcessSettings = CaptureSettings;
+
 }
 
 // Called every frame
@@ -93,37 +117,72 @@ void APortal::Tick(float DeltaTime)
 
 void APortal::UpdateCapture()
 {
-    //DrawDebugPoint(GetWorld(), GetWorld()->GetFirstPlayerController()->PlayerCameraManager->GetCameraLocation(), 5, FColor::Yellow, false, 60);
     APlayerCameraManager* PlayerCamera = 
         GetWorld()->GetFirstPlayerController()->PlayerCameraManager;
     FVector CameraRelativeLocation = 
         PlayerCamera->GetCameraLocation() - GetActorLocation();
 
-    FVector ConvertedCameraLocation = 
+    if (FVector::DotProduct(
+            CameraRelativeLocation, 
+            PlayerCamera->GetActorForwardVector()
+        ) > 0)
+        return;
+
+    SceneCapture->ClipPlaneNormal = 
+        Link->GetActorForwardVector();
+    SceneCapture->ClipPlaneBase = 
+        Link->GetActorLocation();
+
+    UpdateCaptureRecursive(
+        CameraRelativeLocation, 
+        FQuat(PlayerCamera->GetActorQuat()), 
+        1
+    );
+
+    //SetRTT(RenderTarget);
+}
+
+void APortal::HideActorsNotVisible()
+{
+    TArray<AActor*> AllActors;
+    UGameplayStatics::GetAllActorsOfClass(GetWorld(), AActor::StaticClass(), AllActors);
+
+    for (AActor* Actor : AllActors)
+    {
+        FVector Origin;
+        FVector Extent;
+        Actor->GetActorBounds(false, Origin, Extent);
+
+        FVector Distance = Origin - Link->GetActorLocation();
+
+        if (Distance.Size() > Extent.Size() && FVector::DotProduct(Link->GetActorForwardVector(), Distance) < 0.f)
+        {
+            SceneCapture->HideActorComponents(Actor, true);
+        }
+    }
+}
+
+void APortal::UpdateCaptureRecursive(FVector CameraRelativeLocation, FQuat CameraQuat, int Depth)
+{
+    if (Depth > RecursionThreshold)
+        return;
+
+    FVector ConvertedCameraLocation =
         ConvertVectorToOppositeSpace(CameraRelativeLocation);
-    
-    AController* Controller = 
-        UGameplayStatics::GetPlayerController(GetWorld(), 0);
-    FQuat ControllerQuat = 
-        ConvertQuatToOppositeSpace(FQuat(Controller->GetControlRotation()));
 
-    //DrawDebugPoint(GetWorld(), Link->GetActorLocation() + ConvertedCameraLocation, 5, FColor::Red, false, 60);
-    FQuat ConvertedCameraQuat = ConvertQuatToOppositeSpace(FQuat(PlayerCamera->GetActorQuat()));
-    FRotator ConvertedCameraRot = ConvertedCameraQuat.Rotator();
-    //PrintVector(PlayerCamera->GetCameraRotation().Vector());
-   // PrintVector(PlayerCamera->GetCameraLocation());
-    //PrintVector(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0)->GetActorLocation());
+    FQuat ConvertedCameraQuat =
+        ConvertQuatToOppositeSpace(CameraQuat);
 
-    //PrintMessage(FString::SanitizeFloat(ConvertedCameraRot.Roll));
-    //ConvertedCameraRot.Roll -= 180;
-
+    UpdateCaptureRecursive(
+        Link->GetActorLocation() + ConvertedCameraLocation - GetActorLocation(), 
+        ConvertedCameraQuat, 
+        Depth + 1
+    );
     SceneCapture->SetWorldLocation(Link->GetActorLocation() + ConvertedCameraLocation);
-    SceneCapture->SetWorldRotation(ControllerQuat);
-
-    SceneCapture->ClipPlaneNormal = Link->GetActorForwardVector();
-    SceneCapture->ClipPlaneBase = Link->GetActorLocation();
+    SceneCapture->SetWorldRotation(ConvertedCameraQuat);
+    HideActorsNotVisible();
     SceneCapture->CaptureScene();
-    SetRTT(RenderTarget);
+    SceneCapture->ClearHiddenComponents();
 }
 
 void APortal::SetLink(APortal* Target)

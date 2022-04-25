@@ -9,6 +9,7 @@
 #include "GameFramework/Controller.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Components/DrawFrustumComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "TowerOfCodePortalCharacter.h"
 #include "Portal.generated.h"
@@ -34,6 +35,7 @@ protected:
 
 private:
     bool bIsActive;
+    int RecursionThreshold;
 
 public:
 	// Sets default values for this actor's properties
@@ -80,4 +82,8 @@ public:
 
     UFUNCTION(BlueprintNativeEvent, BlueprintCallable)
         void SetRTT(UTexture* RenerTexture);
+
+private:
+    void UpdateCaptureRecursive(FVector CameraRelativeLocation, FQuat CameraQuat, int Depth);
+    void HideActorsNotVisible();
 };
